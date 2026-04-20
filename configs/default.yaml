@@ -1,1 +1,65 @@
+# =========================
+# 基础配置
+# =========================
+seed: 42
+device: cuda
 
+# =========================
+# 数据集
+# =========================
+dataset:
+  name:cosmetics    # options: cosmetics, multi-category, ubf
+  path: datasets/
+
+# =========================
+# 模型参数
+# =========================
+model:
+  emb_dim: 256
+  hgnn_dim: 256
+  gru_dim: 256
+  num_heads: 6
+  num_layers: 2    
+  dropout: 0.1
+  alpha: 0.5
+  num_transformer_layers: 3  
+  loss_lambda: 0.7    
+
+# =========================
+# 训练参数
+# =========================
+training:
+  batch_size: 256     
+  epochs: 50
+  lr: 0.001            
+  num_workers: 4
+  weight_decay: 1.0e-6 
+  patience: 10         
+
+# =========================
+# 评估
+# =========================
+evaluation:
+  batch_size: 1024      
+  topk: [10, 20]
+
+# =========================
+# 路径
+# =========================
+paths:
+  save_model: checkpoints/
+  log_dir: logs/
+  result_dir: results/
+
+# =========================
+# 超图结构
+# =========================
+hypergraph:
+  use_types: ["session", "category", "time", "user"]
+
+# =========================
+# 可复现性
+# =========================
+reproducibility:
+  deterministic: true
+  benchmark: false

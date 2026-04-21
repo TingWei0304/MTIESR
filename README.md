@@ -17,12 +17,12 @@ We propose:
 
 ## Reproducibility Checklist (ACM TORS)
 
-* ✔ Fixed random seed (42)
-* ✔ Deterministic training (cudnn disabled benchmark)
-* ✔ Full preprocessing scripts provided
-* ✔ Exact dataset splits reproducible
-* ✔ All hyperparameters reported
-* ✔ One-command training pipeline
+* Fixed random seed (42)
+* Deterministic training (cudnn disabled benchmark)
+* Full preprocessing scripts provided
+* Exact dataset splits reproducible
+* All hyperparameters reported
+* One-command training pipeline
 
 ---
 

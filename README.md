@@ -15,7 +15,7 @@ We propose:
 
 ---
 
-## Reproducibility Checklist (ACM TORS)
+## Reproducibility Checklist
 
 * Fixed random seed (42)
 * Deterministic training (cudnn disabled benchmark)

@@ -4,101 +4,91 @@ import torch.nn.functional as F
 
 
 class IEGT(nn.Module):
-    """
-    Interval-Enhanced Graph Transformer (简化复现版)
-    """
 
-    def __init__(self, num_items, hidden_size=100, num_heads=4, num_layers=2):
+    def __init__(self, num_items, num_cats, hidden_size=128, num_heads=4, num_layers=2, dropout=0.2):
         super(IEGT, self).__init__()
 
         self.hidden_size = hidden_size
-        self.num_heads = num_heads
 
-        # item embedding
+        # ===== Embedding =====
         self.item_embedding = nn.Embedding(num_items, hidden_size)
+        self.cat_embedding = nn.Embedding(num_cats, hidden_size)
 
-        # time embedding projection
+        # ===== 时间编码 =====
         self.time_linear = nn.Linear(1, hidden_size)
 
-        # transformer layers
-        self.layers = nn.ModuleList([
-            GraphTransformerLayer(hidden_size, num_heads)
-            for _ in range(num_layers)
-        ])
-
-        # attention for long-term preference
-        self.attn_linear = nn.Linear(hidden_size, hidden_size)
-        self.gate = nn.Parameter(torch.Tensor(hidden_size))
-
-        # output
-        self.output = nn.Linear(hidden_size, num_items)
-
-        self.reset_parameters()
-
-    def reset_parameters(self):
-        nn.init.xavier_uniform_(self.item_embedding.weight)
-        nn.init.xavier_uniform_(self.time_linear.weight)
-        nn.init.xavier_uniform_(self.output.weight)
-
-    def forward(self, session_items, time_intervals):
-        """
-        session_items: [B, L]
-        time_intervals: [B, L]
-        """
-
-        # item embedding
-        item_emb = self.item_embedding(session_items)  # [B, L, D]
-
-        # time embedding (exponential decay)
-        time_intervals = time_intervals.unsqueeze(-1)  # [B, L, 1]
-        time_feat = torch.exp(-time_intervals)
-        time_emb = self.time_linear(time_feat)
-
-        # concat
-        x = item_emb + time_emb  # [B, L, D]
-
-        # transformer
-        for layer in self.layers:
-            x = layer(x)
-
-        # short-term preference (last item)
-        h_s = x[:, -1, :]  # [B, D]
-
-        # long-term preference (attention)
-        attn_scores = torch.matmul(x, self.gate)
-        attn_weights = F.softmax(attn_scores, dim=1)
-        h_l = torch.sum(attn_weights.unsqueeze(-1) * x, dim=1)
-
-        # fusion
-        h = 0.5 * h_l + 0.5 * h_s
-
-        # prediction
-        logits = self.output(h)
-
-        return logits
-
-
-class GraphTransformerLayer(nn.Module):
-    def __init__(self, hidden_size, num_heads):
-        super().__init__()
-
-        self.attn = nn.MultiheadAttention(hidden_size, num_heads, batch_first=True)
-        self.norm1 = nn.LayerNorm(hidden_size)
-
-        self.ffn = nn.Sequential(
-            nn.Linear(hidden_size, hidden_size),
-            nn.ReLU(),
-            nn.Linear(hidden_size, hidden_size)
+        # ===== Transformer =====
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=hidden_size,
+            nhead=num_heads,
+            dropout=dropout,
+            batch_first=True
         )
-        self.norm2 = nn.LayerNorm(hidden_size)
+        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
 
-    def forward(self, x):
-        # self-attention
-        attn_out, _ = self.attn(x, x, x)
-        x = self.norm1(x + attn_out)
+        # ===== 长期兴趣 attention =====
+        self.attn_linear = nn.Linear(hidden_size, 1)
 
-        # feedforward
-        ffn_out = self.ffn(x)
-        x = self.norm2(x + ffn_out)
+        # ===== 融合 =====
+        self.dropout = nn.Dropout(dropout)
 
-        return x
+        # ===== 输出 =====
+        self.item_fc = nn.Linear(hidden_size, num_items)
+        self.cat_fc = nn.Linear(hidden_size, num_cats)
+
+    def forward(self, items, cats, hypergraphs=None, times=None, masks=None):
+        """
+        items: [B, L]
+        cats: [B, L]
+        times: [B, L]
+        masks: [B, L]
+        """
+
+        # ===== Embedding =====
+        item_emb = self.item_embedding(items)   # [B, L, D]
+        cat_emb = self.cat_embedding(cats)      # [B, L, D]
+
+        x = item_emb + cat_emb   # 简化融合（论文可写 early fusion）
+
+        # ===== 时间信息 =====
+        if times is not None:
+            t = times.float().unsqueeze(-1)   # [B, L, 1]
+            t = torch.exp(-t)                # exponential decay
+            t_emb = self.time_linear(t)
+            x = x + t_emb
+
+        # ===== Transformer（加 mask）=====
+        if masks is not None:
+            # True=有效 → transformer需要False=mask
+            src_key_padding_mask = ~masks
+        else:
+            src_key_padding_mask = None
+
+        x = self.transformer(x, src_key_padding_mask=src_key_padding_mask)
+
+        # ===== Short-term =====
+        h_s = x[:, -1, :]   # [B, D]
+
+        # ===== Long-term =====
+        attn_score = self.attn_linear(x).squeeze(-1)  # [B, L]
+
+        if masks is not None:
+            attn_score = attn_score.masked_fill(~masks, -1e9)
+
+        attn_weight = torch.softmax(attn_score, dim=1)
+        h_l = torch.sum(attn_weight.unsqueeze(-1) * x, dim=1)
+
+        # ===== 融合 =====
+        h = 0.5 * h_s + 0.5 * h_l
+        h = self.dropout(h)
+
+        # ===== 输出 =====
+        item_logits = self.item_fc(h)
+        cat_logits = self.cat_fc(h)
+
+        return item_logits, cat_logits
+
+    def loss(self, item_pred, cat_pred, item_targets, cat_targets):
+        loss_item = F.cross_entropy(item_pred, item_targets)
+        loss_cat = F.cross_entropy(cat_pred, cat_targets)
+        return loss_item + 0.5 * loss_cat

@@ -1,56 +1,57 @@
 import torch
-from torch import nn
-import numpy as np
-import math
-from GNN import GNN
+import torch.nn as nn
+import torch.nn.functional as F
+
 
 class CaSe4SR(nn.Module):
-    def __init__(self,args, num_item, num_cat, cat4item) -> None:
+    def __init__(self, num_items, num_cats, emb_dim=128, dropout=0.2):
         super().__init__()
-        self.dim = args.dim
 
-        self.item_embedding = nn.Embedding(num_item, args.dim)
-        self.cat_embedding = nn.Embedding(num_cat, args.dim)
+        self.emb_dim = emb_dim
 
-        self.cat4item = nn.parameter.Parameter(torch.LongTensor(cat4item),requires_grad=False)
+        # ===== Embedding =====
+        self.item_embedding = nn.Embedding(num_items, emb_dim)
+        self.cat_embedding = nn.Embedding(num_cats, emb_dim)
 
-        self.item_gnn = GNN(args.dim,args.dim)
-        self.cat_gnn = GNN(args.dim,args.dim)
+        # ===== Attention =====
+        self.w1 = nn.Linear(emb_dim * 2, emb_dim * 2)
+        self.w2 = nn.Linear(emb_dim * 2, emb_dim * 2, bias=False)
+        self.q = nn.Linear(emb_dim * 2, 1)
 
-        self.q = nn.Linear(args.dim*2,1)
-        self.w1 = nn.Linear(args.dim*2, args.dim*2)
-        self.w2 = nn.Linear(args.dim*2, args.dim*2,bias=False)
+        self.dropout = nn.Dropout(dropout)
 
-        self.loss_function = nn.CrossEntropyLoss()
+        # ===== 输出 =====
+        self.fc = nn.Linear(emb_dim * 2, num_items)
 
-        self.reset_parameters()
+    def forward(self, items, cats, hypergraphs=None, times=None, masks=None):
 
-    def reset_parameters(self):
-        stdv = 0.1
-        for m in self.modules():
-            if isinstance(m, nn.Linear):
-                nn.init.normal_(m.weight, std=stdv)
-        nn.init.normal_(self.item_embedding.weight,std=stdv)
-        nn.init.normal_(self.cat_embedding.weight,std=stdv)
+        # ===== Embedding =====
+        item_emb = self.item_embedding(items)   # [B, L, D]
+        cat_emb = self.cat_embedding(cats)      # [B, L, D]
 
-    def forward(self, items, cats, item2idx, cat2idx, item_e, cat_e,item_e_w,cat_e_w, session_len ):
+        # 拼接 item + category
+        x = torch.cat([item_emb, cat_emb], dim=-1)  # [B, L, 2D]
 
-        item_emb = self.item_embedding(items)
-        cat_emb = self.cat_embedding(cats)
+        # ===== last item =====
+        last = x[:, -1, :].unsqueeze(1).repeat(1, x.size(1), 1)
 
-        et = self.item_gnn(item_emb, item_e, item_e_w)[item2idx]
-        ft = self.cat_gnn(cat_emb, cat_e, cat_e_w)[cat2idx]
+        # ===== Attention =====
+        alpha = self.q(torch.sigmoid(self.w1(x) + self.w2(last))).squeeze(-1)  # [B, L]
 
-        eft = torch.concat([et,ft],-1)
-        per_sess_emb = torch.split(eft,session_len) # split tensor by session length
+        if masks is not None:
+            alpha = alpha.masked_fill(~masks, -1e9)
 
-        last_emb = torch.concat([embs[-1].unsqueeze(0).repeat(len(embs),1) for embs in per_sess_emb],dim=0) # [en;fn]
+        alpha = torch.softmax(alpha, dim=1).unsqueeze(-1)
 
-        alpha = self.q(torch.sigmoid(self.w1(eft) + self.w2(last_emb)))
+        # ===== session 表示 =====
+        session_emb = torch.sum(alpha * x, dim=1)  # [B, 2D]
 
-        per_final_emb = torch.split((alpha*eft),session_len) # split tensor by session length
+        session_emb = self.dropout(session_emb)
 
-        sg = torch.stack([embs.sum(0) for embs in per_final_emb],dim=0)
+        # ===== 输出 =====
+        logits = self.fc(session_emb)
 
-        all_item = torch.concat([self.item_embedding.weight, self.cat_embedding(self.cat4item)],dim=-1)
-        return torch.matmul(sg, all_item.T)
+        return logits, logits
+
+    def loss(self, item_pred, cat_pred, item_targets, cat_targets):
+        return F.cross_entropy(item_pred, item_targets)

@@ -1,169 +1,76 @@
-#!/usr/bin/env python36
-# -*- coding: utf-8 -*-
-"""
-Created on July, 2018
-
-@author: Tangrizzly
-"""
-
-import datetime
-import math
-import numpy as np
 import torch
-from torch import nn
-from torch.nn import Module, Parameter
+import torch.nn as nn
 import torch.nn.functional as F
 
 
-class GNN(Module):
-    def __init__(self, hidden_size, step=1):
-        super(GNN, self).__init__()
-        self.step = step
+class SRGNN(nn.Module):
+
+
+    def __init__(self, num_items, num_cats, hidden_size=128, step=1, dropout=0.2):
+        super(SRGNN, self).__init__()
+
         self.hidden_size = hidden_size
-        self.input_size = hidden_size * 2
-        self.gate_size = 3 * hidden_size
-        self.w_ih = Parameter(torch.Tensor(self.gate_size, self.input_size))
-        self.w_hh = Parameter(torch.Tensor(self.gate_size, self.hidden_size))
-        self.b_ih = Parameter(torch.Tensor(self.gate_size))
-        self.b_hh = Parameter(torch.Tensor(self.gate_size))
-        self.b_iah = Parameter(torch.Tensor(self.hidden_size))
-        self.b_oah = Parameter(torch.Tensor(self.hidden_size))
+        self.step = step
 
-        self.linear_edge_in = nn.Linear(self.hidden_size, self.hidden_size, bias=True)
-        self.linear_edge_out = nn.Linear(self.hidden_size, self.hidden_size, bias=True)
-        self.linear_edge_f = nn.Linear(self.hidden_size, self.hidden_size, bias=True)
+        # ===== Embedding =====
+        self.item_embedding = nn.Embedding(num_items, hidden_size)
+        self.cat_embedding = nn.Embedding(num_cats, hidden_size)
 
-    def GNNCell(self, A, hidden):
-        input_in = torch.matmul(A[:, :, :A.shape[1]], self.linear_edge_in(hidden)) + self.b_iah
-        input_out = torch.matmul(A[:, :, A.shape[1]: 2 * A.shape[1]], self.linear_edge_out(hidden)) + self.b_oah
-        inputs = torch.cat([input_in, input_out], 2)
-        gi = F.linear(inputs, self.w_ih, self.b_ih)
-        gh = F.linear(hidden, self.w_hh, self.b_hh)
-        i_r, i_i, i_n = gi.chunk(3, 2)
-        h_r, h_i, h_n = gh.chunk(3, 2)
-        resetgate = torch.sigmoid(i_r + h_r)
-        inputgate = torch.sigmoid(i_i + h_i)
-        newgate = torch.tanh(i_n + resetgate * h_n)
-        hy = newgate + inputgate * (hidden - newgate)
-        return hy
+        # ===== GNN (简化版) =====
+        self.gnn_linear = nn.Linear(hidden_size, hidden_size)
 
-    def forward(self, A, hidden):
-        for i in range(self.step):
-            hidden = self.GNNCell(A, hidden)
-        return hidden
+        # ===== Attention =====
+        self.linear_one = nn.Linear(hidden_size, hidden_size)
+        self.linear_two = nn.Linear(hidden_size, hidden_size)
+        self.linear_three = nn.Linear(hidden_size, 1, bias=False)
 
+        self.dropout = nn.Dropout(dropout)
 
-class SessionGraph(Module):
-    def __init__(self, opt, n_node):
-        super(SessionGraph, self).__init__()
-        self.hidden_size = opt.hiddenSize
-        self.n_node = n_node
-        self.batch_size = opt.batchSize
-        self.nonhybrid = opt.nonhybrid
-        self.embedding = nn.Embedding(self.n_node, self.hidden_size)
-        self.gnn = GNN(self.hidden_size, step=opt.step)
-        self.linear_one = nn.Linear(self.hidden_size, self.hidden_size, bias=True)
-        self.linear_two = nn.Linear(self.hidden_size, self.hidden_size, bias=True)
-        self.linear_three = nn.Linear(self.hidden_size, 1, bias=False)
-        self.linear_transform = nn.Linear(self.hidden_size * 2, self.hidden_size, bias=True)
-        # 交叉熵损失
-        self.loss_function = nn.CrossEntropyLoss()
-        # 首先创建了一个 Adam 优化器（optimizer），并设置学习率（lr）和权重衰减（weight decay）参数为 opt.lr 和 opt.l2，分别用于控制优化算法的学习速率和正则化项
-        self.optimizer = torch.optim.Adam(self.parameters(), lr=opt.lr, weight_decay=opt.l2)
-        # StepLR 调度器会每经过 step_size 个 epoch（训练周期）就将学习率乘以 gamma，以降低学习率，从而更加精细地调整模型在训练过程中的学习速率
-        self.scheduler = torch.optim.lr_scheduler.StepLR(self.optimizer, step_size=opt.lr_dc_step, gamma=opt.lr_dc)
-        self.reset_parameters()
+        # ===== 输出 =====
+        self.item_fc = nn.Linear(hidden_size, num_items)
+        self.cat_fc = nn.Linear(hidden_size, num_cats)
 
-    def reset_parameters(self):
-        stdv = 1.0 / math.sqrt(self.hidden_size)
-        for weight in self.parameters():
-            weight.data.uniform_(-stdv, stdv)
+    def forward(self, items, cats, hypergraphs=None, times=None, masks=None):
+        """
+        items: [B, L]
+        masks: [B, L]
+        """
 
-    def compute_scores(self, hidden, mask):
-        ht = hidden[torch.arange(mask.shape[0]).long(), torch.sum(mask, 1) - 1]  # batch_size x latent_size
-        q1 = self.linear_one(ht).view(ht.shape[0], 1, ht.shape[1])  # batch_size x 1 x latent_size
-        q2 = self.linear_two(hidden)  # batch_size x seq_length x latent_size
-        alpha = self.linear_three(torch.sigmoid(q1 + q2))
-        a = torch.sum(alpha * hidden * mask.view(mask.shape[0], -1, 1).float(), 1)
-        if not self.nonhybrid:
-            a = self.linear_transform(torch.cat([a, ht], 1))
-        b = self.embedding.weight[1:]  # n_nodes x latent_size
-        scores = torch.matmul(a, b.transpose(1, 0))
-        return scores
+        # ===== embedding =====
+        h = self.item_embedding(items)  # [B, L, D]
 
-    def forward(self, inputs, A):
-        hidden = self.embedding(inputs)
-        hidden = self.gnn(A, hidden)
-        return hidden
+        # ===== 简化 GNN（邻接信息用线性近似）=====
+        for _ in range(self.step):
+            h = self.gnn_linear(h)
 
+        # ===== last item =====
+        ht = h[:, -1, :]  # [B, D]
 
-def trans_to_cuda(variable):
-    if torch.cuda.is_available():
-        return variable.cuda()
-    else:
-        return variable
+        # ===== attention =====
+        q1 = self.linear_one(ht).unsqueeze(1)   # [B,1,D]
+        q2 = self.linear_two(h)                # [B,L,D]
 
+        alpha = self.linear_three(torch.sigmoid(q1 + q2)).squeeze(-1)  # [B,L]
 
-def trans_to_cpu(variable):
-    if torch.cuda.is_available():
-        return variable.cpu()
-    else:
-        return variable
+        if masks is not None:
+            alpha = alpha.masked_fill(~masks, -1e9)
 
+        alpha = torch.softmax(alpha, dim=1).unsqueeze(-1)
 
-def forward(model, i, data):
-    alias_inputs, A, items, mask, targets = data.get_slice(i)
-    alias_inputs = trans_to_cuda(torch.Tensor(alias_inputs).long())
-    items = trans_to_cuda(torch.Tensor(items).long())
-    A = trans_to_cuda(torch.Tensor(A).float())
-    mask = trans_to_cuda(torch.Tensor(mask).long())
-    hidden = model(items, A)
-    get = lambda i: hidden[i][alias_inputs[i]]
-    seq_hidden = torch.stack([get(i) for i in torch.arange(len(alias_inputs)).long()])
-    return targets, model.compute_scores(seq_hidden, mask)
+        # ===== session 表示 =====
+        a = torch.sum(alpha * h, dim=1)
 
+        # ===== 融合 =====
+        a = torch.cat([a, ht], dim=-1)
+        a = nn.Linear(self.hidden_size * 2, self.hidden_size).to(a.device)(a)
 
-def train_test(model, train_data, test_data):
-    model.scheduler.step()
-    print('start training: ', datetime.datetime.now())
-    model.train()
-    total_loss = 0.0
-    slices = train_data.generate_batch(model.batch_size)
-    for i, j in zip(slices, np.arange(len(slices))):
-        model.optimizer.zero_grad()
-        targets, scores = forward(model, i, train_data)
-        targets = trans_to_cuda(torch.Tensor(targets).long())
-        loss = model.loss_function(scores, targets - 1)
-        loss.backward()
-        model.optimizer.step()
-        total_loss += loss
-        if j % int(len(slices) / 5 + 1) == 0:
-            print('[%d/%d] Loss: %.4f' % (j, len(slices), loss.item()))
-    print('\tLoss:\t%.3f' % total_loss)
+        a = self.dropout(a)
 
-    print('start predicting: ', datetime.datetime.now())
-    model.eval()
-    hit_10, mrr_10, hit_20, mrr_20 = [], [], [], []
-    slices = test_data.generate_batch(model.batch_size)
-    for i in slices:
-        targets, scores = forward(model, i, test_data)
-        sub_scores_10 = scores.topk(10)[1]
-        sub_scores_20 = scores.topk(20)[1]
-        sub_scores_10 = trans_to_cpu(sub_scores_10).detach().numpy()
-        sub_scores_20 = trans_to_cpu(sub_scores_20).detach().numpy()
-        for score_10, score_20, target, mask in zip(sub_scores_10, sub_scores_20, targets, test_data.mask):
-            hit_10.append(np.isin(target - 1, score_10))
-            hit_20.append(np.isin(target - 1, score_20))
-            if len(np.where(score_10 == target - 1)[0]) == 0:
-                mrr_10.append(0)
-            else:
-                mrr_10.append(1 / (np.where(score_10 == target - 1)[0][0] + 1))
-            if len(np.where(score_20 == target - 1)[0]) == 0:
-                mrr_20.append(0)
-            else:
-                mrr_20.append(1 / (np.where(score_20 == target - 1)[0][0] + 1))
-    hit_10 = np.mean(hit_10) * 100
-    mrr_10 = np.mean(mrr_10) * 100
-    hit_20 = np.mean(hit_20) * 100
-    mrr_20 = np.mean(mrr_20) * 100
-    return hit_10, mrr_10, hit_20, mrr_20
+        # ===== 输出 =====
+        item_logits = self.item_fc(a)
+        cat_logits = self.cat_fc(a)
+
+        return item_logits, cat_logits
+
+    def loss(self, item_pred, cat_pred, item_targets, cat_targets):
+        return F.cross_entropy(item_pred, item_targets)

@@ -3,13 +3,12 @@ from tqdm import tqdm
 
 
 class Trainer:
-    def __init__(self, model, device, hypergraphs):
+    def __init__(self, model, device, hypergraphs=None):
         self.model = model.to(device)
         self.device = device
         self.hypergraphs = hypergraphs
 
     def train(self, train_loader, val_loader, test_loader, evaluator, epochs, lr, save_path):
-
         optimizer = torch.optim.Adam(self.model.parameters(), lr=lr)
 
         for epoch in range(epochs):
@@ -23,14 +22,26 @@ class Trainer:
                 cats = cats.to(self.device)
                 item_targets = item_targets.to(self.device)
                 cat_targets = cat_targets.to(self.device)
+                masks = masks.to(self.device)
+                times = times.to(self.device)
 
                 optimizer.zero_grad()
 
+                # ===== 统一 forward（关键）=====
                 item_pred, cat_pred = self.model(
-                    items, cats, self.hypergraphs, times, masks
+                    items=items,
+                    cats=cats,
+                    hypergraphs=self.hypergraphs,
+                    times=times,
+                    masks=masks
                 )
 
-                loss = self.model.loss(item_pred, cat_pred, item_targets, cat_targets)
+                loss = self.model.loss(
+                    item_pred,
+                    cat_pred,
+                    item_targets,
+                    cat_targets
+                )
 
                 loss.backward()
                 optimizer.step()
@@ -47,5 +58,14 @@ class Trainer:
         self.evaluate(test_loader, evaluator, "Test")
 
     def evaluate(self, loader, evaluator, mode):
-        results = evaluator.evaluate(self.model, loader, self.device, self.hypergraphs)
+        self.model.eval()
+
+        with torch.no_grad():
+            results = evaluator.evaluate(
+                self.model,
+                loader,
+                self.device,
+                self.hypergraphs
+            )
+
         print(f"[{mode}] {results}")

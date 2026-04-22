@@ -63,3 +63,54 @@ hypergraph:
 reproducibility:
   deterministic: true
   benchmark: false
+
+# =========================
+# baseline
+# =========================
+  SRGNN_config = {
+    "hidden_size": 100,
+    "step": 1,
+    "batch_size": 100,
+    "lr": 0.001,
+    "l2": 1e-5,
+    "lr_dc_step": 3,
+    "lr_dc": 0.1,
+    "dropout": 0.2
+}
+CaSe4SR_config = {
+    "dim": 128,
+    "lr": 0.0005,
+    "batch_size": 128,
+    "contrastive_weight": 0.2,
+    "temperature": 0.2,
+    "dropout": 0.2
+}
+CMHGNN_config = {
+    "hiddenSize": 100,
+    "n_iter": 1,
+    "n_sample": 12,
+    "dropout_local": 0.5,
+    "dropout_global": 0.5,
+    "lr": 0.001,
+    "l2": 1e-5,
+    "batch_size": 100
+}
+IEGT_config = {
+    "hidden_size": 128,
+    "num_heads": 4,
+    "num_layers": 2,
+    "lr": 0.001,
+    "batch_size": 128,
+    "dropout": 0.2
+}
+STEM_config = {
+    "embedding_dim": 10,
+    "num_layers": 1,
+    "num_shared_experts": 2,
+    "num_specific_experts": 2,
+    "expert_hidden_units": [256, 128],
+    "gate_hidden_units": [128],
+    "tower_hidden_units": [64],
+    "lr": 0.001,
+    "batch_size": 256
+}
